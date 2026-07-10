@@ -1,6 +1,7 @@
 -- PuraVida - esquema inicial MySQL 8
--- Este esquema mantiene PEDIDOS como tabla principal para pedidos de app y ventas manuales.
--- No se persiste VENTAS_UNIFICADAS por decision de normalizacion; las ventas consolidadas se consultan desde PEDIDOS aceptados.
+-- PEDIDOS conserva el flujo operativo; VENTAS representa las ventas efectivas generadas por pedidos aceptados.
+-- No se persiste una tabla o vista consolidada adicional; las ventas se consultan desde VENTAS
+-- con JOIN hacia PEDIDOS y DETALLE_PEDIDO cuando corresponda.
 
 SET NAMES utf8mb4;
 SET time_zone = '+00:00';
@@ -119,23 +120,20 @@ CREATE TABLE IF NOT EXISTS `PEDIDOS` (
   `Id_cliente` INT NULL,
   `Fecha` DATE NOT NULL,
   `Hora` TIME NOT NULL,
-  `Fuente` ENUM('pedido_app', 'venta_manual') NOT NULL DEFAULT 'pedido_app'
-    COMMENT 'Distingue pedidos capturados desde la app y ventas presenciales manuales.',
   `Estado` ENUM('pendiente', 'aceptado', 'rechazado', 'cancelado') NOT NULL DEFAULT 'pendiente'
-    COMMENT 'Estado aceptado representa una venta efectiva para metricas y reportes.',
+    COMMENT 'Flujo operativo del pedido; Estado aceptado debe generar una venta efectiva en VENTAS.',
   `Total` DECIMAL(10,2) NOT NULL,
   `Tiempo_espera_est` VARCHAR(100) NULL,
   `Motivo_rechazo` TEXT NULL,
   `Categoria_rechazo` ENUM('platillo_agotado', 'fonda_cerrada', 'pedido_fuera_de_horario', 'cantidad_no_disponible', 'otro') NULL,
   `Respondido_por` INT NULL,
   `Respondido_en` TIMESTAMP NULL DEFAULT NULL,
-  `Observaciones` TEXT NULL COMMENT 'Notas operativas, especialmente utiles para ventas manuales.',
+  `Observaciones` TEXT NULL COMMENT 'Notas operativas del pedido.',
   `Creado_en` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (`Id_pedido`),
   KEY `idx_pedidos_cliente` (`Id_cliente`),
   KEY `idx_pedidos_respondido_por` (`Respondido_por`),
   KEY `idx_pedidos_estado_fecha` (`Estado`, `Fecha`),
-  KEY `idx_pedidos_fuente_estado_fecha` (`Fuente`, `Estado`, `Fecha`),
   CONSTRAINT `fk_pedidos_cliente`
     FOREIGN KEY (`Id_cliente`) REFERENCES `USUARIOS` (`Id_usuario`)
     ON UPDATE CASCADE
@@ -146,14 +144,39 @@ CREATE TABLE IF NOT EXISTS `PEDIDOS` (
     ON DELETE SET NULL,
   CONSTRAINT `chk_pedidos_total`
     CHECK (`Total` >= 0),
-  CONSTRAINT `chk_pedidos_cliente_por_fuente`
-    CHECK (`Fuente` = 'venta_manual' OR `Id_cliente` IS NOT NULL),
-  CONSTRAINT `chk_pedidos_venta_manual_aceptada`
-    CHECK (`Fuente` <> 'venta_manual' OR (`Estado` = 'aceptado' AND `Respondido_por` IS NOT NULL)),
   CONSTRAINT `chk_pedidos_rechazo_estado`
     CHECK (`Estado` = 'rechazado' OR (`Motivo_rechazo` IS NULL AND `Categoria_rechazo` IS NULL))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
-COMMENT='Tabla principal de operaciones: pedidos de app y ventas manuales. Las ventas se consolidan consultando Estado=aceptado; no se duplica informacion financiera.';
+COMMENT='Solicitudes operativas del sistema; los pedidos aceptados generan una venta efectiva en VENTAS.';
+
+CREATE TABLE IF NOT EXISTS `VENTAS` (
+  `Id_venta` INT NOT NULL AUTO_INCREMENT,
+  `Id_pedido` INT NOT NULL,
+  `Fuente` ENUM('manual_fonda', 'remota') NOT NULL
+    COMMENT 'manual_fonda = venta presencial capturada por encargada; remota = pedido realizado desde la app.',
+  `Fecha` DATE NOT NULL,
+  `Hora` TIME NOT NULL,
+  `Total` DECIMAL(10,2) NOT NULL,
+  `Registrado_por` INT NULL COMMENT 'Usuario encargada que registro o confirmo la venta.',
+  `Observaciones` TEXT NULL,
+  `Creado_en` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (`Id_venta`),
+  UNIQUE KEY `idx_ventas_id_pedido` (`Id_pedido`),
+  KEY `idx_ventas_fecha` (`Fecha`),
+  KEY `idx_ventas_fuente_fecha` (`Fuente`, `Fecha`),
+  KEY `idx_ventas_registrado_por` (`Registrado_por`),
+  CONSTRAINT `fk_ventas_id_pedido`
+    FOREIGN KEY (`Id_pedido`) REFERENCES `PEDIDOS` (`Id_pedido`)
+    ON UPDATE CASCADE
+    ON DELETE RESTRICT,
+  CONSTRAINT `fk_ventas_registrado_por`
+    FOREIGN KEY (`Registrado_por`) REFERENCES `USUARIOS` (`Id_usuario`)
+    ON UPDATE CASCADE
+    ON DELETE SET NULL,
+  CONSTRAINT `chk_ventas_total`
+    CHECK (`Total` >= 0)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+COMMENT='Ventas efectivas generadas por pedidos aceptados; distingue fuente manual en fonda o remota sin duplicar el detalle del pedido.';
 
 CREATE TABLE IF NOT EXISTS `DETALLE_PEDIDO` (
   `Id_detalle_pedido` INT NOT NULL AUTO_INCREMENT,
@@ -233,7 +256,7 @@ CREATE TABLE IF NOT EXISTS `METRICAS_PLATILLO_DIA` (
   CONSTRAINT `chk_metricas_platillo_dia_total`
     CHECK (`Total_generado` >= 0)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
-COMMENT='Metricas derivadas de PEDIDOS y DETALLE_PEDIDO; Cantidad_vendida y Total_generado deben calcularse desde PEDIDOS con Estado=aceptado.';
+COMMENT='Metricas derivadas de PEDIDOS, VENTAS y DETALLE_PEDIDO; Cantidad_vendida y Total_generado deben calcularse desde VENTAS unidas al detalle del pedido.';
 
 CREATE TABLE IF NOT EXISTS `METRICAS_HORA_PICO` (
   `Id_metrica_hora` INT NOT NULL AUTO_INCREMENT,
@@ -249,7 +272,7 @@ CREATE TABLE IF NOT EXISTS `METRICAS_HORA_PICO` (
   CONSTRAINT `chk_metricas_hora_pico_total`
     CHECK (`Total_ventas` >= 0)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
-COMMENT='Metricas de demanda por franja horaria calculadas desde PEDIDOS aceptados.';
+COMMENT='Metricas de demanda por franja horaria calculadas desde VENTAS.';
 
 CREATE TABLE IF NOT EXISTS `METRICAS_RECHAZOS` (
   `Id_metrica_rechazo` INT NOT NULL AUTO_INCREMENT,
@@ -273,8 +296,8 @@ CREATE TABLE IF NOT EXISTS `REPORTES_SEMANALES` (
   `Id_reporte` INT NOT NULL AUTO_INCREMENT,
   `Semana_inicio` DATE NOT NULL,
   `Semana_fin` DATE NOT NULL,
-  `Total_pedidos_app` INT NOT NULL DEFAULT 0 COMMENT 'Pedidos con Fuente=pedido_app y Estado=aceptado dentro de la semana.',
-  `Total_ingresos` DECIMAL(10,2) NOT NULL DEFAULT 0.00 COMMENT 'Ingresos calculados desde PEDIDOS con Estado=aceptado.',
+  `Total_pedidos_app` INT NOT NULL DEFAULT 0 COMMENT 'Ventas remotas con Fuente=remota dentro de la semana.',
+  `Total_ingresos` DECIMAL(10,2) NOT NULL DEFAULT 0.00 COMMENT 'Ingresos calculados desde VENTAS.',
   `Id_platillo_mas_vendido` INT NULL,
   `Dia_mayor_demanda` DATE NULL,
   `Ruta_archivo` TEXT NULL,
@@ -297,17 +320,4 @@ CREATE TABLE IF NOT EXISTS `REPORTES_SEMANALES` (
   CONSTRAINT `chk_reportes_semanales_totales`
     CHECK (`Total_pedidos_app` >= 0 AND `Total_ingresos` >= 0)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
-COMMENT='Snapshot de reportes PDF; sus importes y conteos se calculan desde PEDIDOS aceptados y DETALLE_PEDIDO.';
-
-CREATE OR REPLACE VIEW `VW_VENTAS_CONSOLIDADAS` AS
-SELECT
-  `p`.`Id_pedido` AS `Id_venta`,
-  `p`.`Fecha`,
-  `p`.`Hora`,
-  `p`.`Fuente`,
-  `p`.`Respondido_por` AS `Registrado_por`,
-  `p`.`Total`,
-  `p`.`Observaciones`,
-  `p`.`Creado_en`
-FROM `PEDIDOS` AS `p`
-WHERE `p`.`Estado` = 'aceptado';
+COMMENT='Snapshot de reportes PDF; sus importes y conteos se calculan desde VENTAS, PEDIDOS y DETALLE_PEDIDO segun corresponda.';
