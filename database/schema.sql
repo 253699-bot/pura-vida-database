@@ -120,8 +120,8 @@ CREATE TABLE IF NOT EXISTS `PEDIDOS` (
   `Id_cliente` INT NULL,
   `Fecha` DATE NOT NULL,
   `Hora` TIME NOT NULL,
-  `Estado` ENUM('pendiente', 'aceptado', 'rechazado', 'cancelado') NOT NULL DEFAULT 'pendiente'
-    COMMENT 'Flujo operativo del pedido; Estado aceptado debe generar una venta efectiva en VENTAS.',
+  `Estado` ENUM('pendiente', 'aceptado', 'finalizado', 'rechazado', 'cancelado') NOT NULL DEFAULT 'pendiente'
+    COMMENT 'Flujo operativo del pedido; aceptado y finalizado deben conservar una venta efectiva en VENTAS.',
   `Total` DECIMAL(10,2) NOT NULL,
   `Tiempo_espera_est` VARCHAR(100) NULL,
   `Motivo_rechazo` TEXT NULL,
@@ -147,7 +147,7 @@ CREATE TABLE IF NOT EXISTS `PEDIDOS` (
   CONSTRAINT `chk_pedidos_rechazo_estado`
     CHECK (`Estado` = 'rechazado' OR (`Motivo_rechazo` IS NULL AND `Categoria_rechazo` IS NULL))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
-COMMENT='Solicitudes operativas del sistema; los pedidos aceptados generan una venta efectiva en VENTAS.';
+COMMENT='Solicitudes operativas; los pedidos aceptados pueden finalizarse y conservan su venta efectiva en VENTAS.';
 
 CREATE TABLE IF NOT EXISTS `VENTAS` (
   `Id_venta` INT NOT NULL AUTO_INCREMENT,
@@ -216,6 +216,7 @@ CREATE TABLE IF NOT EXISTS `NOTIFICACIONES` (
   `Id_notificacion` INT NOT NULL AUTO_INCREMENT,
   `Id_usuario` INT NOT NULL,
   `Id_pedido` INT NULL,
+  `Tipo` VARCHAR(50) NOT NULL,
   `Titulo` VARCHAR(150) NOT NULL,
   `Mensaje` TEXT NOT NULL,
   `Estado` ENUM('no_leida', 'leida') NOT NULL DEFAULT 'no_leida',
@@ -223,6 +224,7 @@ CREATE TABLE IF NOT EXISTS `NOTIFICACIONES` (
   `Leida_en` TIMESTAMP NULL DEFAULT NULL,
   PRIMARY KEY (`Id_notificacion`),
   KEY `idx_notificaciones_usuario_estado` (`Id_usuario`, `Estado`),
+  KEY `idx_notificaciones_usuario_fecha` (`Id_usuario`, `Creado_en`, `Id_notificacion`),
   KEY `idx_notificaciones_id_pedido` (`Id_pedido`),
   CONSTRAINT `fk_notificaciones_id_usuario`
     FOREIGN KEY (`Id_usuario`) REFERENCES `USUARIOS` (`Id_usuario`)
