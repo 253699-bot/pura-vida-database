@@ -31,6 +31,35 @@ mysql -u <admin_user> -p <database_name> < database/migrations/002_update_ventas
 
 Antes de ejecutar migraciones sobre una base existente, hacer backup y revisar que el estado de la base corresponda a la version esperada por la migracion.
 
+### Notificaciones internas
+
+El esquema base actual ya incluye `NOTIFICACIONES.Tipo`. Para una base creada
+con una version anterior del esquema, donde `NOTIFICACIONES` existe pero no
+tiene esa columna, aplicar una sola vez:
+
+```bash
+mysql -u <admin_user> -p <database_name> < database/migrations/004_add_notification_type.sql
+```
+
+La migracion conserva las notificaciones existentes con el tipo `sistema` y
+agrega el indice de listado por usuario y fecha. No debe aplicarse sobre una
+base creada directamente con el `schema.sql` actual.
+
+### Finalizacion de pedidos
+
+El esquema base actual permite la transicion `aceptado -> finalizado`. Para una
+base existente cuyo enum `PEDIDOS.Estado` aun no incluya `finalizado`, aplicar
+despues de las migraciones de ventas:
+
+```bash
+mysql -u <admin_user> -p <database_name> < database/migrations/005_add_finalized_order_status.sql
+```
+
+La migracion solo amplia el enum y conserva los datos actuales. Sus consultas
+finales verifican el tipo de columna, la distribucion de estados y que no haya
+pedidos finalizados sin venta. No debe aplicarse sobre una base creada
+directamente con el `schema.sql` actual.
+
 La migración 002 debe ejecutarse después de la 001. Antes de aplicarla, revisa
 el conteo de preflight incluido en el script: las filas `manual_fonda` deben
 tener `Id_pedido` nulo y las filas `remota` deben conservar un pedido.
