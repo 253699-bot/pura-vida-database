@@ -1,5 +1,5 @@
 -- PuraVida - esquema inicial MySQL 8
--- PEDIDOS conserva el flujo operativo; VENTAS representa las ventas efectivas generadas por pedidos aceptados.
+-- PEDIDOS conserva el flujo operativo; VENTAS representa las ventas efectivas generadas por pedidos finalizados o ventas manuales.
 -- No se persiste una tabla o vista consolidada adicional; las ventas se consultan desde VENTAS
 -- con JOIN hacia PEDIDOS y DETALLE_PEDIDO cuando corresponda.
 
@@ -25,6 +25,8 @@ COMMENT='Usuarios autenticables del sistema; Rol distingue clientes y encargada.
 
 CREATE TABLE IF NOT EXISTS `CONFIGURACION_NEGOCIO` (
   `Id_config` INT NOT NULL AUTO_INCREMENT,
+  `Singleton_key` TINYINT NOT NULL DEFAULT 1
+    COMMENT 'Garantiza una sola fuente publica de configuracion.',
   `Nombre_fonda` VARCHAR(150) NOT NULL DEFAULT 'PuraVida',
   `Logo_url` TEXT NULL,
   `Direccion` TEXT NULL,
@@ -34,12 +36,19 @@ CREATE TABLE IF NOT EXISTS `CONFIGURACION_NEGOCIO` (
   `Actualizado_por` INT NULL COMMENT 'Usuario que modifico la configuracion por ultima vez.',
   `Actualizado_en` TIMESTAMP NULL DEFAULT NULL ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (`Id_config`),
+  UNIQUE KEY `uk_configuracion_negocio_singleton` (`Singleton_key`),
   CONSTRAINT `fk_configuracion_negocio_actualizado_por`
     FOREIGN KEY (`Actualizado_por`) REFERENCES `USUARIOS` (`Id_usuario`)
     ON UPDATE CASCADE
-    ON DELETE SET NULL
+    ON DELETE SET NULL,
+  CONSTRAINT `chk_configuracion_negocio_singleton`
+    CHECK (`Singleton_key` = 1)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
-COMMENT='Configuracion editable de la fonda.';
+COMMENT='Fuente publica unica y editable de la fonda.';
+
+INSERT INTO `CONFIGURACION_NEGOCIO` (`Singleton_key`, `Nombre_fonda`)
+SELECT 1, 'PuraVida'
+WHERE NOT EXISTS (SELECT 1 FROM `CONFIGURACION_NEGOCIO`);
 
 CREATE TABLE IF NOT EXISTS `ESTADO_DIA` (
   `Id_estado` INT NOT NULL AUTO_INCREMENT,
@@ -49,8 +58,11 @@ CREATE TABLE IF NOT EXISTS `ESTADO_DIA` (
   `Registrado_por` INT NOT NULL,
   `Creado_en` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   `Actualizado_en` TIMESTAMP NULL DEFAULT NULL ON UPDATE CURRENT_TIMESTAMP,
+  `Ciclo_iniciado_en` TIMESTAMP NULL DEFAULT NULL
+    COMMENT 'Inicio del ciclo operativo abierto actual; se actualiza al abrir la fonda.',
   PRIMARY KEY (`Id_estado`),
   UNIQUE KEY `uk_estado_dia_fecha` (`Fecha`),
+  KEY `idx_estado_dia_ciclo_iniciado_en` (`Ciclo_iniciado_en`),
   CONSTRAINT `fk_estado_dia_registrado_por`
     FOREIGN KEY (`Registrado_por`) REFERENCES `USUARIOS` (`Id_usuario`)
     ON UPDATE CASCADE
@@ -66,6 +78,7 @@ CREATE TABLE IF NOT EXISTS `PLATILLOS` (
   `Descripcion` TEXT NULL,
   `Tipo_platillo` ENUM('platillo_fuerte', 'bebida', 'complemento', 'postre') NOT NULL,
   `Precio_base` DECIMAL(8,2) NOT NULL,
+  `Imagen_url` TEXT NULL COMMENT 'Clave publica/segura de la imagen del platillo almacenada fuera de la base de datos.',
   `Activo` BOOLEAN NOT NULL DEFAULT TRUE,
   `Creado_en` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   `Actualizado_en` TIMESTAMP NULL DEFAULT NULL ON UPDATE CURRENT_TIMESTAMP,
@@ -80,10 +93,13 @@ CREATE TABLE IF NOT EXISTS `MENU_DIA` (
   `Fecha` DATE NOT NULL,
   `Id_platillo` INT NOT NULL,
   `Precio_dia` DECIMAL(8,2) NOT NULL,
+  `Publicado` BOOLEAN NOT NULL DEFAULT FALSE
+    COMMENT 'TRUE cuando la fila puede exponerse en los menus publicos.',
   `Creado_por` INT NOT NULL,
   `Creado_en` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (`Id_menu`),
   UNIQUE KEY `uk_menu_dia_fecha_platillo` (`Fecha`, `Id_platillo`),
+  KEY `idx_menu_dia_fecha_publicado` (`Fecha`, `Publicado`),
   KEY `idx_menu_dia_platillo` (`Id_platillo`),
   KEY `idx_menu_dia_creado_por` (`Creado_por`),
   CONSTRAINT `fk_menu_dia_platillo`
@@ -115,24 +131,55 @@ CREATE TABLE IF NOT EXISTS `DISPONIBILIDAD_MENU` (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
 COMMENT='Disponibilidad operacional de cada platillo publicado en el menu.';
 
+CREATE TABLE IF NOT EXISTS `CARRITO_ITEMS` (
+  `Id_carrito_item` INT NOT NULL AUTO_INCREMENT,
+  `Id_usuario` INT NOT NULL,
+  `Id_platillo` INT NOT NULL,
+  `Cantidad` INT NOT NULL,
+  `Precio_unitario` DECIMAL(8,2) NOT NULL
+    COMMENT 'Snapshot del precio vigente al agregar el platillo al carrito.',
+  `Creado_en` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `Actualizado_en` TIMESTAMP NULL DEFAULT NULL ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`Id_carrito_item`),
+  UNIQUE KEY `uk_carrito_items_usuario_platillo` (`Id_usuario`, `Id_platillo`),
+  KEY `idx_carrito_items_usuario` (`Id_usuario`),
+  KEY `idx_carrito_items_platillo` (`Id_platillo`),
+  CONSTRAINT `fk_carrito_items_usuario`
+    FOREIGN KEY (`Id_usuario`) REFERENCES `USUARIOS` (`Id_usuario`)
+    ON UPDATE CASCADE
+    ON DELETE RESTRICT,
+  CONSTRAINT `fk_carrito_items_platillo`
+    FOREIGN KEY (`Id_platillo`) REFERENCES `PLATILLOS` (`Id_platillo`)
+    ON UPDATE CASCADE
+    ON DELETE RESTRICT,
+  CONSTRAINT `chk_carrito_items_cantidad`
+    CHECK (`Cantidad` > 0),
+  CONSTRAINT `chk_carrito_items_precio_unitario`
+    CHECK (`Precio_unitario` >= 0)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+COMMENT='Items temporales previos al pedido; son los unicos datos operativos que pueden eliminarse fisicamente.';
+
 CREATE TABLE IF NOT EXISTS `PEDIDOS` (
   `Id_pedido` INT NOT NULL AUTO_INCREMENT,
   `Id_cliente` INT NULL,
   `Fecha` DATE NOT NULL,
   `Hora` TIME NOT NULL,
   `Estado` ENUM('pendiente', 'aceptado', 'finalizado', 'rechazado', 'cancelado') NOT NULL DEFAULT 'pendiente'
-    COMMENT 'Flujo operativo del pedido; aceptado y finalizado deben conservar una venta efectiva en VENTAS.',
+    COMMENT 'Flujo operativo del pedido; la venta remota se genera al pasar correctamente a finalizado.',
   `Total` DECIMAL(10,2) NOT NULL,
   `Tiempo_espera_est` VARCHAR(100) NULL,
   `Motivo_rechazo` TEXT NULL,
   `Categoria_rechazo` ENUM('platillo_agotado', 'fonda_cerrada', 'pedido_fuera_de_horario', 'cantidad_no_disponible', 'otro') NULL,
   `Respondido_por` INT NULL,
   `Respondido_en` TIMESTAMP NULL DEFAULT NULL,
+  `Cancelado_por` INT NULL,
+  `Cancelado_en` TIMESTAMP NULL DEFAULT NULL,
   `Observaciones` TEXT NULL COMMENT 'Notas operativas del pedido.',
   `Creado_en` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (`Id_pedido`),
   KEY `idx_pedidos_cliente` (`Id_cliente`),
   KEY `idx_pedidos_respondido_por` (`Respondido_por`),
+  KEY `idx_pedidos_cancelado_por` (`Cancelado_por`),
   KEY `idx_pedidos_estado_fecha` (`Estado`, `Fecha`),
   CONSTRAINT `fk_pedidos_cliente`
     FOREIGN KEY (`Id_cliente`) REFERENCES `USUARIOS` (`Id_usuario`)
@@ -142,45 +189,88 @@ CREATE TABLE IF NOT EXISTS `PEDIDOS` (
     FOREIGN KEY (`Respondido_por`) REFERENCES `USUARIOS` (`Id_usuario`)
     ON UPDATE CASCADE
     ON DELETE SET NULL,
+  CONSTRAINT `fk_pedidos_cancelado_por`
+    FOREIGN KEY (`Cancelado_por`) REFERENCES `USUARIOS` (`Id_usuario`)
+    ON UPDATE CASCADE
+    ON DELETE SET NULL,
   CONSTRAINT `chk_pedidos_total`
     CHECK (`Total` >= 0),
   CONSTRAINT `chk_pedidos_rechazo_estado`
     CHECK (`Estado` = 'rechazado' OR (`Motivo_rechazo` IS NULL AND `Categoria_rechazo` IS NULL))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
-COMMENT='Solicitudes operativas; los pedidos aceptados pueden finalizarse y conservan su venta efectiva en VENTAS.';
+COMMENT='Solicitudes operativas; los pedidos aceptados pueden finalizarse y solo finalizado representa pago/venta remota.';
 
 CREATE TABLE IF NOT EXISTS `VENTAS` (
   `Id_venta` INT NOT NULL AUTO_INCREMENT,
-  `Id_pedido` INT NOT NULL,
+  `Id_pedido` INT NULL
+    COMMENT 'NULL para venta manual_fonda; obligatorio para venta remota.',
   `Fuente` ENUM('manual_fonda', 'remota') NOT NULL
     COMMENT 'manual_fonda = venta presencial capturada por encargada; remota = pedido realizado desde la app.',
+  `Estado` ENUM('activa', 'anulada') NOT NULL DEFAULT 'activa'
+    COMMENT 'Estado logico; las anuladas se excluyen de estadisticas y reportes.',
+  `Clave_idempotencia` VARCHAR(100) CHARACTER SET ascii COLLATE ascii_bin NULL
+    COMMENT 'Clave por encargada para reintentar una venta manual sin duplicarla.',
   `Fecha` DATE NOT NULL,
   `Hora` TIME NOT NULL,
   `Total` DECIMAL(10,2) NOT NULL,
   `Registrado_por` INT NULL COMMENT 'Usuario encargada que registro o confirmo la venta.',
   `Observaciones` TEXT NULL,
+  `Motivo_anulacion` TEXT NULL,
+  `Anulada_en` TIMESTAMP NULL DEFAULT NULL,
+  `Id_usuario_anulo` INT NULL
+    COMMENT 'Usuario encargada que realizo la anulacion logica.',
   `Creado_en` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (`Id_venta`),
-  UNIQUE KEY `idx_ventas_id_pedido` (`Id_pedido`),
+  UNIQUE KEY `uq_ventas_id_pedido` (`Id_pedido`),
+  UNIQUE KEY `uk_ventas_registrado_por_clave_idempotencia` (`Registrado_por`, `Clave_idempotencia`),
   KEY `idx_ventas_fecha` (`Fecha`),
   KEY `idx_ventas_fuente_fecha` (`Fuente`, `Fecha`),
+  KEY `idx_ventas_estado_fecha` (`Estado`, `Fecha`),
   KEY `idx_ventas_registrado_por` (`Registrado_por`),
-  CONSTRAINT `fk_ventas_id_pedido`
+  KEY `idx_ventas_usuario_anulo` (`Id_usuario_anulo`),
+  CONSTRAINT `fk_ventas_pedido`
     FOREIGN KEY (`Id_pedido`) REFERENCES `PEDIDOS` (`Id_pedido`)
-    ON UPDATE CASCADE
+    ON UPDATE RESTRICT
     ON DELETE RESTRICT,
   CONSTRAINT `fk_ventas_registrado_por`
     FOREIGN KEY (`Registrado_por`) REFERENCES `USUARIOS` (`Id_usuario`)
     ON UPDATE CASCADE
     ON DELETE SET NULL,
+  CONSTRAINT `fk_ventas_usuario_anulo`
+    FOREIGN KEY (`Id_usuario_anulo`) REFERENCES `USUARIOS` (`Id_usuario`)
+    ON UPDATE CASCADE
+    ON DELETE SET NULL,
   CONSTRAINT `chk_ventas_total`
-    CHECK (`Total` >= 0)
+    CHECK (`Total` >= 0),
+  CONSTRAINT `chk_ventas_fuente_id_pedido`
+    CHECK (
+      (`Fuente` = 'manual_fonda' AND `Id_pedido` IS NULL)
+      OR
+      (`Fuente` = 'remota' AND `Id_pedido` IS NOT NULL)
+    ),
+  CONSTRAINT `chk_ventas_anulacion`
+    CHECK (
+      (
+        `Estado` = 'activa'
+        AND `Motivo_anulacion` IS NULL
+        AND `Anulada_en` IS NULL
+      )
+      OR
+      (
+        `Estado` = 'anulada'
+        AND NULLIF(TRIM(`Motivo_anulacion`), '') IS NOT NULL
+        AND `Anulada_en` IS NOT NULL
+      )
+    ),
+  CONSTRAINT `chk_ventas_clave_idempotencia_fuente`
+    CHECK (`Clave_idempotencia` IS NULL OR `Fuente` = 'manual_fonda')
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
-COMMENT='Ventas efectivas generadas por pedidos aceptados; distingue fuente manual en fonda o remota sin duplicar el detalle del pedido.';
+COMMENT='Ventas efectivas manuales o remotas; conserva anulacion logica e idempotencia sin duplicar fuentes.';
 
 CREATE TABLE IF NOT EXISTS `DETALLE_PEDIDO` (
   `Id_detalle_pedido` INT NOT NULL AUTO_INCREMENT,
-  `Id_pedido` INT NOT NULL,
+  `Id_pedido` INT NULL,
+  `Id_venta` INT NULL,
   `Id_platillo` INT NULL,
   `Id_menu` INT NULL,
   `Nombre_platillo` VARCHAR(150) NOT NULL COMMENT 'Snapshot del nombre al momento de capturar el pedido.',
@@ -191,9 +281,14 @@ CREATE TABLE IF NOT EXISTS `DETALLE_PEDIDO` (
   KEY `idx_detalle_pedido_id_pedido` (`Id_pedido`),
   KEY `idx_detalle_pedido_id_platillo` (`Id_platillo`),
   KEY `idx_detalle_pedido_id_menu` (`Id_menu`),
+  UNIQUE KEY `uk_detalle_pedido_venta_menu` (`Id_venta`, `Id_menu`),
   CONSTRAINT `fk_detalle_pedido_id_pedido`
     FOREIGN KEY (`Id_pedido`) REFERENCES `PEDIDOS` (`Id_pedido`)
-    ON UPDATE CASCADE
+    ON UPDATE RESTRICT
+    ON DELETE RESTRICT,
+  CONSTRAINT `fk_detalle_pedido_id_venta`
+    FOREIGN KEY (`Id_venta`) REFERENCES `VENTAS` (`Id_venta`)
+    ON UPDATE RESTRICT
     ON DELETE RESTRICT,
   CONSTRAINT `fk_detalle_pedido_id_platillo`
     FOREIGN KEY (`Id_platillo`) REFERENCES `PLATILLOS` (`Id_platillo`)
@@ -201,8 +296,16 @@ CREATE TABLE IF NOT EXISTS `DETALLE_PEDIDO` (
     ON DELETE SET NULL,
   CONSTRAINT `fk_detalle_pedido_id_menu`
     FOREIGN KEY (`Id_menu`) REFERENCES `MENU_DIA` (`Id_menu`)
-    ON UPDATE CASCADE
-    ON DELETE SET NULL,
+    ON UPDATE RESTRICT
+    ON DELETE RESTRICT,
+  CONSTRAINT `chk_detalle_un_solo_padre`
+    CHECK (
+      (`Id_pedido` IS NOT NULL AND `Id_venta` IS NULL)
+      OR
+      (`Id_pedido` IS NULL AND `Id_venta` IS NOT NULL)
+    ),
+  CONSTRAINT `chk_detalle_venta_manual_menu`
+    CHECK (`Id_venta` IS NULL OR `Id_menu` IS NOT NULL),
   CONSTRAINT `chk_detalle_pedido_cantidad`
     CHECK (`Cantidad` > 0),
   CONSTRAINT `chk_detalle_pedido_precio_unitario`
@@ -303,10 +406,14 @@ CREATE TABLE IF NOT EXISTS `REPORTES_SEMANALES` (
   `Id_platillo_mas_vendido` INT NULL,
   `Dia_mayor_demanda` DATE NULL,
   `Ruta_archivo` TEXT NULL,
+  `Resumen_json` JSON NULL
+    COMMENT 'Snapshot estructurado usado para regenerar o auditar el reporte.',
+  `Version_formato` INT NOT NULL DEFAULT 1
+    COMMENT 'Version del contrato almacenado en Resumen_json.',
   `Generado_por` INT NULL,
   `Generado_en` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (`Id_reporte`),
-  UNIQUE KEY `uk_reportes_semanales_semana` (`Semana_inicio`, `Semana_fin`),
+  KEY `idx_reportes_semanales_semana_generado` (`Semana_inicio`, `Semana_fin`, `Generado_en`, `Id_reporte`),
   KEY `idx_reportes_semanales_platillo_mas_vendido` (`Id_platillo_mas_vendido`),
   KEY `idx_reportes_semanales_generado_por` (`Generado_por`),
   CONSTRAINT `fk_reportes_semanales_platillo_mas_vendido`
@@ -320,6 +427,8 @@ CREATE TABLE IF NOT EXISTS `REPORTES_SEMANALES` (
   CONSTRAINT `chk_reportes_semanales_fechas`
     CHECK (`Semana_inicio` <= `Semana_fin`),
   CONSTRAINT `chk_reportes_semanales_totales`
-    CHECK (`Total_pedidos_app` >= 0 AND `Total_ingresos` >= 0)
+    CHECK (`Total_pedidos_app` >= 0 AND `Total_ingresos` >= 0),
+  CONSTRAINT `chk_reportes_semanales_version_formato`
+    CHECK (`Version_formato` > 0)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
-COMMENT='Snapshot de reportes PDF; sus importes y conteos se calculan desde VENTAS, PEDIDOS y DETALLE_PEDIDO segun corresponda.';
+COMMENT='Snapshots de reportes PDF; permite multiples generaciones por semana y conserva importes y conteos calculados desde VENTAS, PEDIDOS y DETALLE_PEDIDO segun corresponda.';
