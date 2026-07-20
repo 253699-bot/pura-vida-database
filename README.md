@@ -13,7 +13,7 @@ ejecuta únicamente ese archivo:
 mysql -u <admin_user> -p <database_name> < database/schema.sql
 ```
 
-No se deben aplicar las migraciones `001`-`008` después de crear una base con
+No se deben aplicar las migraciones `001`-`009` después de crear una base con
 el esquema final: sus cambios estructurales ya están incorporados.
 
 ### Base existente
@@ -31,12 +31,16 @@ este orden, cuando sus precondiciones correspondan:
 006_complete_admin_flows.sql
 007_add_dish_image.sql
 008_allow_multiple_weekly_report_snapshots.sql
+009_add_business_cycle_started_at.sql
 ```
 
 `004` solo corresponde cuando `NOTIFICACIONES` todavía no tiene `Tipo`; `005`
 solo cuando `PEDIDOS.Estado` todavía no incluye `finalizado`. La migración
 `006` exige como baseline el resultado completo de `001`-`005`, incluido
-`CARRITO_ITEMS`, `NOTIFICACIONES.Tipo` y el estado `finalizado`. `007` agrega la URL nullable de imagen para platillos y `008` permite guardar varios snapshots semanales independientes.
+`CARRITO_ITEMS`, `NOTIFICACIONES.Tipo` y el estado `finalizado`. `007` agrega la
+URL nullable de imagen para platillos, `008` permite guardar varios snapshots
+semanales independientes y `009` registra el inicio del ciclo operativo actual
+en `ESTADO_DIA.Ciclo_iniciado_en`.
 
 Ejecutar cada script con el cliente MySQL sin `--force`. Revisar primero sus
 consultas de preflight y detenerse si una comprobación falla. En particular:
