@@ -1,89 +1,89 @@
 # PuraVida Database
 
-Scripts SQL para la base de datos de PuraVida.
+Scripts SQL para la base de datos MySQL 8 de PuraVida.
 
 ## Uso
 
 ### Base nueva
 
-Para crear una base nueva desde cero, cargar el esquema base y después aplicar
-la migración 002:
+`database/schema.sql` es el esquema final autocontenido. Para una base vacía se
+ejecuta únicamente ese archivo:
 
 ```bash
 mysql -u <admin_user> -p <database_name> < database/schema.sql
-mysql -u <admin_user> -p <database_name> < database/migrations/002_update_ventas_for_manual_and_cancellation.sql
 ```
 
-`database/schema.sql` ya incluye la tabla `VENTAS` y deja `PEDIDOS` sin la
-columna histórica `Fuente`. La migración 002 habilita ventas manuales sin
-pedido y agrega la anulación lógica.
-
-No ejecutar `database/migrations/001_add_ventas_move_fuente_from_pedidos.sql` sobre una base creada con este schema actualizado, porque esa migracion es para bases antiguas.
+No se deben aplicar las migraciones `001`-`008` después de crear una base con
+el esquema final: sus cambios estructurales ya están incorporados.
 
 ### Base existente
 
-Para una base creada con una version anterior del schema, ejecutar las migraciones en orden:
+Antes de cualquier migración, crear un respaldo y confirmar la versión real del
+esquema. Las migraciones históricas se conservan y se aplican una sola vez, en
+este orden, cuando sus precondiciones correspondan:
 
-```bash
-mysql -u <admin_user> -p <database_name> < database/migrations/001_add_ventas_move_fuente_from_pedidos.sql
-mysql -u <admin_user> -p <database_name> < database/migrations/002_update_ventas_for_manual_and_cancellation.sql
+```text
+001_add_ventas_move_fuente_from_pedidos.sql
+002_update_ventas_for_manual_and_cancellation.sql
+003_add_cart_items.sql
+004_add_notification_type.sql
+005_add_finalized_order_status.sql
+006_complete_admin_flows.sql
+007_add_dish_image.sql
+008_allow_multiple_weekly_report_snapshots.sql
 ```
 
-Antes de ejecutar migraciones sobre una base existente, hacer backup y revisar que el estado de la base corresponda a la version esperada por la migracion.
+`004` solo corresponde cuando `NOTIFICACIONES` todavía no tiene `Tipo`; `005`
+solo cuando `PEDIDOS.Estado` todavía no incluye `finalizado`. La migración
+`006` exige como baseline el resultado completo de `001`-`005`, incluido
+`CARRITO_ITEMS`, `NOTIFICACIONES.Tipo` y el estado `finalizado`. `007` agrega la URL nullable de imagen para platillos y `008` permite guardar varios snapshots semanales independientes.
 
-### Notificaciones internas
+Ejecutar cada script con el cliente MySQL sin `--force`. Revisar primero sus
+consultas de preflight y detenerse si una comprobación falla. En particular:
 
-El esquema base actual ya incluye `NOTIFICACIONES.Tipo`. Para una base creada
-con una version anterior del esquema, donde `NOTIFICACIONES` existe pero no
-tiene esa columna, aplicar una sola vez:
-
-```bash
-mysql -u <admin_user> -p <database_name> < database/migrations/004_add_notification_type.sql
-```
-
-La migracion conserva las notificaciones existentes con el tipo `sistema` y
-agrega el indice de listado por usuario y fecha. No debe aplicarse sobre una
-base creada directamente con el `schema.sql` actual.
-
-### Finalizacion de pedidos
-
-El esquema base actual permite la transicion `aceptado -> finalizado`. Para una
-base existente cuyo enum `PEDIDOS.Estado` aun no incluya `finalizado`, aplicar
-despues de las migraciones de ventas:
-
-```bash
-mysql -u <admin_user> -p <database_name> < database/migrations/005_add_finalized_order_status.sql
-```
-
-La migracion solo amplia el enum y conserva los datos actuales. Sus consultas
-finales verifican el tipo de columna, la distribucion de estados y que no haya
-pedidos finalizados sin venta. No debe aplicarse sobre una base creada
-directamente con el `schema.sql` actual.
-
-La migración 002 debe ejecutarse después de la 001. Antes de aplicarla, revisa
-el conteo de preflight incluido en el script: las filas `manual_fonda` deben
-tener `Id_pedido` nulo y las filas `remota` deben conservar un pedido.
+- `002` no puede decidir automáticamente qué hacer con ventas históricas cuya
+  combinación `Fuente`/`Id_pedido` sea incompatible.
+- `006` aborta antes del primer `ALTER` si está incompleta o parcialmente
+  aplicada, si el baseline no coincide o si `CONFIGURACION_NEGOCIO` tiene más
+  de una fila. Esas configuraciones deben fusionarse manualmente; la migración
+  no borra datos para resolverlo.
+- `006` preserva las filas antiguas de `MENU_DIA` como publicadas y deja
+  `Publicado = FALSE` como valor predeterminado para nuevas filas.
 
 ## Modelo de ventas
 
-`PEDIDOS` conserva el flujo operativo de la solicitud.
+`PEDIDOS` conserva el flujo operativo de las solicitudes remotas. `VENTAS`
+representa los registros efectivos y distingue la fuente real:
 
-`VENTAS` representa el registro efectivo de venta o ticket. Se relaciona
-opcionalmente con `PEDIDOS` mediante `Id_pedido` y distingue el origen con
-`Fuente`:
+- `manual_fonda`: venta presencial sin cliente ni pedido ficticio;
+- `remota`: venta vinculada de forma única con un pedido aceptado.
 
-- `manual_fonda`
-- `remota`
+La anulación es lógica mediante `Estado`, `Motivo_anulacion`, `Anulada_en` e
+`Id_usuario_anulo`; no se elimina la venta. `DETALLE_PEDIDO` conserva snapshots
+de nombre, cantidad, precio y subtotal: una línea pertenece exactamente a un
+pedido remoto o a una venta manual. Las claves foráneas de sus padres y menú
+usan `RESTRICT` para proteger el historial y ser compatibles con los `CHECK` de
+MySQL.
 
-Las ventas `manual_fonda` no requieren pedido. Las ventas `remota` requieren
-un pedido y mantienen unicidad por `Id_pedido`. La anulación es lógica mediante
-`Estado`, `Motivo_anulacion`, `Anulada_en` e `Id_usuario_anulo`; no se elimina
-la fila de venta.
+La idempotencia de ventas manuales se conserva en `VENTAS.Clave_idempotencia`,
+única por encargada. Los reportes semanales pueden tener varias generaciones para la misma semana y guardan cada snapshot estructurado en
+`Resumen_json`; el PDF se regenera y no se almacena como base64.
 
-`VENTAS_UNIFICADAS` no forma parte del modelo final. Las consultas consolidadas deben obtenerse desde `VENTAS` con JOINs hacia `PEDIDOS` y `DETALLE_PEDIDO` cuando corresponda.
+No se agrega una tabla auxiliar de consolidacion. Las estadisticas y reportes
+se calculan desde `VENTAS`, uniendo `PEDIDOS` y `DETALLE_PEDIDO` cuando
+corresponde, y excluyendo ventas anuladas y pedidos invalidos.
 
-La vista antigua `VW_VENTAS_CONSOLIDADAS` solo se elimina en la migracion 001 para limpiar bases previas; no debe reintroducirse sin una decision explicita del equipo.
+## Historial y borrado
+
+Pedidos, ventas, líneas, menús y platillos referenciados no se eliminan
+físicamente. Los platillos usan `PLATILLOS.Activo`, las ventas usan anulación
+lógica y las filas retiradas del menú usan `MENU_DIA.Publicado`. Solo
+`CARRITO_ITEMS`, por ser información temporal anterior al pedido, puede
+eliminarse físicamente.
 
 ## Compatibilidad
 
-El objetivo principal es MySQL 8. La migracion 001 incluye una rama dinamica para manejar la diferencia entre MySQL 8 y MariaDB 10.x al eliminar constraints CHECK.
+El objetivo es MySQL 8.0.16 o superior por el uso efectivo de restricciones
+`CHECK` y columnas `JSON`. La migración `001` conserva una rama histórica de
+compatibilidad para MariaDB, pero el modelo final y `006` se validan contra
+MySQL 8.
